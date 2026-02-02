@@ -1,124 +1,241 @@
 <template>
   <div class="app-root">
-    <header class="header">
-      <h1>Pixe Art Generator</h1>
-      <p class="subtitle">
-        Minimal TypeScript + Vue playground with PNG export.
-      </p>
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Pixel Tool — Local</p>
+        <h1>Pixe Art Generator</h1>
+        <p class="subtitle">
+          Collez votre tableau de caractères, validez-le côté serveur, puis exportez en PNG.
+        </p>
+      </div>
+      <div class="hero-card">
+        <div>
+          <p class="meta-label">Contraintes</p>
+          <p class="meta-value">8 → 64 lignes • 8 → 64 caractères</p>
+        </div>
+        <div>
+          <p class="meta-label">API</p>
+          <p class="meta-value">{{ apiBase }}</p>
+        </div>
+      </div>
     </header>
 
     <main class="main">
       <section class="panel">
-        <h2>Prompt</h2>
-        <textarea
-          v-model="prompt"
-          class="prompt-input"
-          placeholder="Describe the image you want to generate..."
-          rows="4"
-        />
-        <p class="hint">
-          The server API receives this prompt, but image generation is not
-          implemented yet.
-        </p>
+        <div class="panel-header">
+          <h2>Entrée</h2>
+          <span class="badge">Tableau + palette</span>
+        </div>
+
+        <label class="field">
+          <span>Tableau (copier / coller)</span>
+          <textarea
+            v-model="gridText"
+            class="text-area"
+            placeholder="Ex:\n..##..##\n..##..##\n##..##..\n##..##.."
+            rows="10"
+          />
+        </label>
+
+        <label class="field">
+          <span>Palette (caractères uniques, optionnel)</span>
+          <input
+            v-model="paletteInput"
+            class="text-input"
+            placeholder="Ex: .#@*"
+          />
+          <small>Sans séparateurs. Espaces et virgules sont ignorés.</small>
+        </label>
 
         <div class="buttons-row">
-          <button type="button" class="button primary" @click="redrawCanvas">
-            Render Preview
+          <button
+            type="button"
+            class="button primary"
+            :disabled="loading"
+            @click="validateAndRender"
+          >
+            {{ loading ? "Validation..." : "Valider & Rendre" }}
           </button>
-          <button type="button" class="button" @click="downloadPng">
-            Download as PNG
+          <button type="button" class="button" @click="downloadPng" :disabled="!hasRender">
+            Télécharger PNG
           </button>
+          <button type="button" class="button ghost" @click="clearAll">
+            Effacer
+          </button>
+        </div>
+
+        <div v-if="status" class="status-card" :class="status.ok ? 'ok' : 'error'">
+          <p class="status-title">
+            {{ status.ok ? "Validation OK" : "Validation échouée" }}
+          </p>
+          <p class="status-meta" v-if="status.ok">
+            {{ status.width }} × {{ status.height }} • {{ status.uniqueChars.length }} caractères uniques
+          </p>
+          <ul v-if="status.errors.length" class="status-list">
+            <li v-for="item in status.errors" :key="item">{{ item }}</li>
+          </ul>
+          <ul v-if="status.warnings.length" class="status-list warning">
+            <li v-for="item in status.warnings" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+
+        <div v-if="status?.ok" class="palette-preview">
+          <p class="palette-title">Palette utilisée</p>
+          <div class="palette-swatches">
+            <div
+              v-for="(item, index) in palettePreview"
+              :key="`${item.char}-${index}`"
+              class="swatch"
+              :style="{ backgroundColor: item.color }"
+            >
+              <span>{{ item.char === ' ' ? '␠' : item.char }}</span>
+            </div>
+          </div>
         </div>
       </section>
 
       <section class="panel">
-        <h2>Preview (Canvas → PNG)</h2>
-        <canvas ref="canvasRef" :width="canvasWidth" :height="canvasHeight" class="preview-canvas" />
+        <div class="panel-header">
+          <h2>Preview</h2>
+          <span class="badge">Canvas</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas
+            ref="canvasRef"
+            class="preview-canvas"
+            :width="canvasWidth"
+            :height="canvasHeight"
+          />
+        </div>
       </section>
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { computed, ref } from "vue";
+
+type ValidationResponse = {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  width: number;
+  height: number;
+  uniqueChars: string[];
+  paletteChars: string[];
+  lines: string[];
+};
+
+const apiBase = (import.meta.env.VITE_API_BASE as string) || "http://localhost:3001";
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
-const prompt = ref<string>("");
+const gridText = ref<string>("");
+const paletteInput = ref<string>("");
 
-const canvasWidth = 512;
-const canvasHeight = 512;
+const status = ref<ValidationResponse | null>(null);
+const loading = ref(false);
+const hasRender = ref(false);
 
-function drawPlaceholder() {
+const canvasWidth = ref(512);
+const canvasHeight = ref(512);
+
+const palettePreview = computed(() => {
+  if (!status.value?.ok) return [];
+  const colors = buildPalette(status.value.paletteChars.length);
+  return status.value.paletteChars.map((char, index) => ({
+    char,
+    color: colors[index]
+  }));
+});
+
+function buildPalette(count: number) {
+  const colors: string[] = [];
+  const baseHue = 200;
+  const spread = 280;
+  for (let i = 0; i < count; i += 1) {
+    const hue = (baseHue + (i / Math.max(1, count)) * spread) % 360;
+    const saturation = 70;
+    const lightness = 55 - (i % 2) * 8;
+    colors.push(`hsl(${hue} ${saturation}% ${lightness}%)`);
+  }
+  return colors;
+}
+
+async function validateAndRender() {
+  loading.value = true;
+  hasRender.value = false;
+
+  try {
+    const response = await fetch(`${apiBase}/api/validate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        gridText: gridText.value,
+        palette: paletteInput.value
+      })
+    });
+
+    const data = (await response.json()) as ValidationResponse;
+    status.value = data;
+
+    if (data.ok) {
+      drawGrid(data.lines, data.paletteChars);
+      hasRender.value = true;
+    }
+  } catch (error) {
+    status.value = {
+      ok: false,
+      errors: ["Impossible de joindre le serveur."],
+      warnings: [],
+      width: 0,
+      height: 0,
+      uniqueChars: [],
+      paletteChars: [],
+      lines: []
+    };
+  } finally {
+    loading.value = false;
+  }
+}
+
+function drawGrid(lines: string[], paletteChars: string[]) {
   const canvas = canvasRef.value;
   if (!canvas) return;
 
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
-  // Background gradient
-  const gradient = ctx.createLinearGradient(0, 0, canvasWidth, canvasHeight);
-  gradient.addColorStop(0, "#111827");
-  gradient.addColorStop(1, "#1f2937");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+  const width = lines[0]?.length ?? 0;
+  const height = lines.length;
+  if (!width || !height) return;
 
-  // Simple "pixel art" blocks
-  const colors = ["#f97316", "#22c55e", "#3b82f6", "#e11d48", "#a855f7"];
-  const blockSize = 32;
+  const maxSize = 512;
+  const pixelSize = Math.max(4, Math.floor(maxSize / Math.max(width, height)));
 
-  for (let y = 0; y < canvasHeight; y += blockSize) {
-    for (let x = 0; x < canvasWidth; x += blockSize) {
-      if ((x / blockSize + y / blockSize) % 3 === 0) {
-        ctx.fillStyle = colors[(x / blockSize + y / blockSize) % colors.length];
-        ctx.fillRect(x, y, blockSize, blockSize);
-      }
+  canvasWidth.value = width * pixelSize;
+  canvasHeight.value = height * pixelSize;
+
+  canvas.width = canvasWidth.value;
+  canvas.height = canvasHeight.value;
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const colors = buildPalette(paletteChars.length);
+  const colorMap = new Map<string, string>();
+  paletteChars.forEach((char, index) => {
+    colorMap.set(char, colors[index]);
+  });
+
+  for (let y = 0; y < height; y += 1) {
+    const row = lines[y];
+    for (let x = 0; x < width; x += 1) {
+      const char = row[x];
+      const color = colorMap.get(char) ?? "#111827";
+      ctx.fillStyle = color;
+      ctx.fillRect(x * pixelSize, y * pixelSize, pixelSize, pixelSize);
     }
   }
-
-  // Overlay text with the prompt (if any)
-  ctx.fillStyle = "rgba(15, 23, 42, 0.75)";
-  ctx.fillRect(0, canvasHeight - 120, canvasWidth, 120);
-
-  ctx.fillStyle = "#e5e7eb";
-  ctx.font = "20px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
-  ctx.textBaseline = "top";
-
-  const baseText = prompt.value.trim() || "Your prompt will appear here.";
-  const maxWidth = canvasWidth - 40;
-  const lines = wrapText(ctx, baseText, maxWidth);
-
-  let y = canvasHeight - 100;
-  for (const line of lines) {
-    ctx.fillText(line, 20, y);
-    y += 24;
-  }
-}
-
-function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  const words = text.split(" ");
-  const lines: string[] = [];
-  let currentLine = "";
-
-  for (const word of words) {
-    const testLine = currentLine ? `${currentLine} ${word}` : word;
-    const metrics = ctx.measureText(testLine);
-    if (metrics.width > maxWidth && currentLine) {
-      lines.push(currentLine);
-      currentLine = word;
-    } else {
-      currentLine = testLine;
-    }
-  }
-
-  if (currentLine) {
-    lines.push(currentLine);
-  }
-
-  return lines.slice(0, 3); // limit to a few lines to keep it tidy
-}
-
-function redrawCanvas() {
-  drawPlaceholder();
 }
 
 function downloadPng() {
@@ -132,13 +249,15 @@ function downloadPng() {
   link.click();
 }
 
-onMounted(() => {
-  drawPlaceholder();
-});
-
-// Optionally keep the preview roughly in sync as the prompt changes
-watch(prompt, () => {
-  drawPlaceholder();
-});
+function clearAll() {
+  gridText.value = "";
+  paletteInput.value = "";
+  status.value = null;
+  hasRender.value = false;
+  const canvas = canvasRef.value;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
 </script>
-
